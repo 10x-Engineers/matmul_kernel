@@ -10,7 +10,8 @@ alias NUM_ITER = 100
 alias M = 8*62
 alias N = 8*166
 alias K = 1000
-alias nelts = simdwidthof[DType.float32] ()
+# alias nelts = simdwidthof[DType.float32] ()
+alias nelts = 8
 
 fn pretty_print(mat: UnsafePointer[Float32], rows: Int, cols: Int) raises:
     def print_row(row_index: Int):
