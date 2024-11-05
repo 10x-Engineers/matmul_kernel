@@ -1,4 +1,4 @@
-// clang-17 -O2 -mno-avx512f -march=native -DTEST -DNITER=1000 matmul_kernel.c -o matmul_kernel.out && ./matmul_kernel.out
+// clang-17 -O3 -mno-avx512f -march=native -DTEST -DNITER=1000 matmul_kernel.c -o matmul_kernel.out && ./matmul_kernel.out
 #include <assert.h>
 #include <immintrin.h>
 #include <math.h>
@@ -7,9 +7,6 @@
 #include <time.h>
 
 #define MEM_ALIGN 64
-
-// #define MR 16
-// #define NR 6
 
 #define MR 8
 #define NR 8
