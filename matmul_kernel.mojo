@@ -58,28 +58,28 @@ fn kernel_8x8(blockA: UnsafePointer[Float32], blockB: UnsafePointer[Float32], C:
     for p in range(K):
         a_packFloat8 = blockA.load[width = nelts] (p * M)
         
-        b_packFloat8 = SIMD[DType.float32, nelts] (blockB.load[width = 1](0 * K + p))
+        b_packFloat8 = blockB.load[width = 1](0 * K + p)
         C_buffer[0] = a_packFloat8.fma(b_packFloat8, C_buffer[0])
 
-        b_packFloat8 = SIMD[DType.float32, nelts] (blockB.load[width = 1](1 * K + p))
+        b_packFloat8 = blockB.load[width = 1](1 * K + p)
         C_buffer[1] = a_packFloat8.fma(b_packFloat8, C_buffer[1])
 
-        b_packFloat8 = SIMD[DType.float32, nelts] (blockB.load[width = 1](2 * K + p))
+        b_packFloat8 = blockB.load[width = 1](2 * K + p)
         C_buffer[2] = a_packFloat8.fma(b_packFloat8, C_buffer[2])
 
-        b_packFloat8 = SIMD[DType.float32, nelts] (blockB.load[width = 1](3 * K + p))
+        b_packFloat8 = blockB.load[width = 1](3 * K + p)
         C_buffer[3] = a_packFloat8.fma(b_packFloat8, C_buffer[3])
 
-        b_packFloat8 = SIMD[DType.float32, nelts] (blockB.load[width = 1](4 * K + p))
+        b_packFloat8 = blockB.load[width = 1](4 * K + p)
         C_buffer[4] = a_packFloat8.fma(b_packFloat8, C_buffer[4])
 
-        b_packFloat8 = SIMD[DType.float32, nelts] (blockB.load[width = 1](5 * K + p))
+        b_packFloat8 = blockB.load[width = 1](5 * K + p)
         C_buffer[5] = a_packFloat8.fma(b_packFloat8, C_buffer[5])
 
-        b_packFloat8 = SIMD[DType.float32, nelts] (blockB.load[width = 1](6 * K + p))
+        b_packFloat8 = blockB.load[width = 1](6 * K + p)
         C_buffer[6] = a_packFloat8.fma(b_packFloat8, C_buffer[6])
 
-        b_packFloat8 = SIMD[DType.float32, nelts] (blockB.load[width = 1](7 * K + p))
+        b_packFloat8 = blockB.load[width = 1](7 * K + p)
         C_buffer[7] = a_packFloat8.fma(b_packFloat8, C_buffer[7])
 
     for i in range(8):
