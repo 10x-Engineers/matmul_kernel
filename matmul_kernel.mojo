@@ -104,10 +104,10 @@ fn main() raises:
     print("BENCHMARK STARTED")
 
     FLOP = 2 * M * N * K
-    A = UnsafePointer[Float32].alloc(M * K)
-    B = UnsafePointer[Float32].alloc(K * N)
-    C = UnsafePointer[Float32].alloc(M * N)
-    C_ref = UnsafePointer[Float32].alloc(M * N)
+    A = UnsafePointer[Float32, alignment=64].alloc(M * K)
+    B = UnsafePointer[Float32, alignment=64].alloc(K * N)
+    C = UnsafePointer[Float32, alignment=64].alloc(M * N)
+    C_ref = UnsafePointer[Float32, alignment=64].alloc(M * N)
 
     init_rand(A, M, K)
     init_rand(B, K, N)
