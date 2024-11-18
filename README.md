@@ -7,3 +7,7 @@ Run C code:
 Run mojo code:
 
 ```magic run mojo build matmul_kernel.mojo && ./matmul_kernel```
+
+Run Python code (numpy matmul):
+
+```python3 matmul_numpy.py```
