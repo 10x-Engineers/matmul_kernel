@@ -1,4 +1,4 @@
-// clang-17 -O2 -mno-avx512f -march=native -DTEST -DNITER=1000 matmul_pack_mask.c -o matmul_pack_mask.out && ./matmul_pack_mask.out
+// clang-17 -O2 -mno-avx512f -march=native -DNITER=100 -fopenmp matmul_parallel.c -o matmul_parallel.out && ./matmul_parallel.out
 #include <immintrin.h>
 #include <math.h>
 #include <stdint.h>
@@ -7,37 +7,39 @@
 
 #define MEM_ALIGN 64
 
+#define MR 16
+#define NR 6
+#define NTHREADS 8
+
+#define MC MR* NTHREADS * 1
+#define NC NR* NTHREADS * 80
+#define KC 1000
+
 #ifndef MDIM
-#define MDIM 1013
+#define MDIM 1500
 #endif
 
 #ifndef NDIM
-#define NDIM 1022
+#define NDIM 1200
 #endif
 
 #ifndef KDIM
-#define KDIM 1011
+#define KDIM 1800
 #endif
 
 #ifndef NITER
 #define NITER 100
 #endif
 
-#define MR 16
-#define NR 6
-
 #define min(x, y) ((x) < (y) ? (x) : (y))
 
+// Uncomment this section if <float.h> isn't supported in your environment
+#define DBL_MAX 1.7976931348623157e+308
+#define DBL_MIN 2.2250738585072014e-308
 
-void print_mat(float* mat, const int M, const int N) {
-    for (int i = 0; i < M; i++) {
-        for (int j = 0; j < N; j++) {
-            printf("%f ", mat[i * N + j]);
-        }
-        printf("\n");
-    }
-    printf("\n");
-}
+static float blockA_packed[MC * KC] __attribute__((aligned(MEM_ALIGN)));
+static float blockB_packed[NC * KC] __attribute__((aligned(MEM_ALIGN)));
+
 
 void print_row(float* mat, const int row_index, const int cols) {
     for (int j = 0; j < 3; j++) {
@@ -109,97 +111,102 @@ void print_mask(const __m256i mask) {
     printf("\n");
 }
 
-static float blockA_packed[MR * KDIM] __attribute__((aligned(MEM_ALIGN)));
-static float blockB_packed[NR * KDIM] __attribute__((aligned(MEM_ALIGN)));
-
-void pack_blockA(float* A, float* blockA_packed, const int m, const int M, const int K) {
-    for (int p = 0; p < K; p++) {
-        for (int i = 0; i < m; i++) {
-            *blockA_packed = A[p * M + i];
-            blockA_packed++;
+void pack_panelB(float* B, float* blockB_packed, const int nr, const int kc, const int K) {
+    for (int p = 0; p < kc; p++) {
+        for (int j = 0; j < nr; j++) {
+            *blockB_packed++ = B[j * K + p];
         }
-        for (int i = m; i < MR; i++) {
-            *blockA_packed = 0.0;
-            blockA_packed++;
+        for (int j = nr; j < NR; j++) {
+            *blockB_packed++ = 0;
         }
     }
 }
 
-void pack_blockB(float* B, float* blockB_packed, const int n, const int N, const int K) {
-    for (int p = 0; p < K; p++) {
-        for (int j = 0; j < n; j++) {
-            *blockB_packed = B[j * K + p];
-            blockB_packed++;
+void pack_blockB(float* B, float* blockB_packed, const int nc, const int kc, const int K) {
+#pragma omp parallel for num_threads(NTHREADS) schedule(static)
+    for (int j = 0; j < nc; j += NR) {
+        const int nr = min(NR, nc - j);
+        pack_panelB(&B[j * K], &blockB_packed[j * kc], nr, kc, K);
+    }
+}
+
+void pack_panelA(float* A, float* blockA_packed, const int mr, const int kc, const int M) {
+    for (int p = 0; p < kc; p++) {
+        for (int i = 0; i < mr; i++) {
+            *blockA_packed++ = A[p * M + i];
         }
-        for (int j = n; j < NR; j++) {
-            *blockB_packed = 0.0;
-            blockB_packed++;
+        for (int i = mr; i < MR; i++) {
+            *blockA_packed++ = 0;
         }
+    }
+}
+
+void pack_blockA(float* A, float* blockA_packed, const int mc, const int kc, const int M) {
+#pragma omp parallel for num_threads(NTHREADS) schedule(static)
+    for (int i = 0; i < mc; i += MR) {
+        const int mr = min(MR, mc - i);
+        pack_panelA(&A[i], &blockA_packed[i * kc], mr, kc, M);
     }
 }
 
 void kernel_16x6(float* blockA_packed, float* blockB_packed, float* C, const int m, const int n,
-                 const int M, const int N, const int K) {
-
-    __m256i masks[2];
-    __m256 C_buffer[12];  // Flattened C_buffer as a 1D array
-    for (int i = 0; i < 12; i++) {
-        C_buffer[i] = _mm256_setzero_ps();
-    }
-    __m256 b_packFloat8[6];
+                 const int k, const int M) {
+    __m256 C_buffer[12]; // 6x2 becomes a linear array of size 12
+    __m256 b_packFloat8;
     __m256 a0_packFloat8;
     __m256 a1_packFloat8;
+    __m256i packed_masks[2];
 
-    if (m != 16) {  // Changed to fixed MR value
+    if (m != 16) {
         const unsigned int bit_mask = 65535;
-        masks[0] = _mm256_setr_epi32(
+        packed_masks[0] = _mm256_setr_epi32(
             bit_mask << (m + 15), bit_mask << (m + 14), bit_mask << (m + 13), bit_mask << (m + 12),
             bit_mask << (m + 11), bit_mask << (m + 10), bit_mask << (m + 9), bit_mask << (m + 8));
-        masks[1] = _mm256_setr_epi32(bit_mask << (m + 7), bit_mask << (m + 6), bit_mask << (m + 5),
-                                     bit_mask << (m + 4), bit_mask << (m + 3), bit_mask << (m + 2),
-                                     bit_mask << (m + 1), bit_mask << m);
+        packed_masks[1] = _mm256_setr_epi32(
+            bit_mask << (m + 7), bit_mask << (m + 6), bit_mask << (m + 5), bit_mask << (m + 4),
+            bit_mask << (m + 3), bit_mask << (m + 2), bit_mask << (m + 1), bit_mask << m);
 
         for (int j = 0; j < n; j++) {
-            C_buffer[2 * j]     = _mm256_maskload_ps(&C[j * M], masks[0]);
-            C_buffer[2 * j + 1] = _mm256_maskload_ps(&C[j * M + 8], masks[1]);
+            C_buffer[j * 2] = _mm256_maskload_ps(&C[j * M], packed_masks[0]);
+            C_buffer[j * 2 + 1] = _mm256_maskload_ps(&C[j * M + 8], packed_masks[1]);
         }
+
+
     } else {
         for (int j = 0; j < n; j++) {
-            C_buffer[2 * j]     = _mm256_loadu_ps(&C[j * M]);
-            C_buffer[2 * j + 1] = _mm256_loadu_ps(&C[j * M + 8]);
+            C_buffer[j * 2] = _mm256_loadu_ps(&C[j * M]);
+            C_buffer[j * 2 + 1] = _mm256_loadu_ps(&C[j * M + 8]);
         }
     }
 
-    for (int p = 0; p < K; p++) {
+    for (int p = 0; p < k; p++) {
         a0_packFloat8 = _mm256_loadu_ps(blockA_packed);
         a1_packFloat8 = _mm256_loadu_ps(blockA_packed + 8);
 
-        // Pre-broadcast each blockB_packed element for this iteration
-        b_packFloat8[0] = _mm256_broadcast_ss(blockB_packed);
-        b_packFloat8[1] = _mm256_broadcast_ss(blockB_packed + 1);
-        b_packFloat8[2] = _mm256_broadcast_ss(blockB_packed + 2);
-        b_packFloat8[3] = _mm256_broadcast_ss(blockB_packed + 3);
-        b_packFloat8[4] = _mm256_broadcast_ss(blockB_packed + 4);
-        b_packFloat8[5] = _mm256_broadcast_ss(blockB_packed + 5);
+        // Unrolled multiplication and accumulation for 6 elements in blockB_packed
+        b_packFloat8 = _mm256_broadcast_ss(blockB_packed);
+        C_buffer[0] = _mm256_fmadd_ps(a0_packFloat8, b_packFloat8, C_buffer[0]);
+        C_buffer[1] = _mm256_fmadd_ps(a1_packFloat8, b_packFloat8, C_buffer[1]);
 
-        // Unroll the loop, applying each b_packFloat8 to the respective C_buffer position
-        C_buffer[0] = _mm256_fmadd_ps(a0_packFloat8, b_packFloat8[0], C_buffer[0]);
-        C_buffer[1] = _mm256_fmadd_ps(a1_packFloat8, b_packFloat8[0], C_buffer[1]);
+        b_packFloat8 = _mm256_broadcast_ss(blockB_packed + 1);
+        C_buffer[2] = _mm256_fmadd_ps(a0_packFloat8, b_packFloat8, C_buffer[2]);
+        C_buffer[3] = _mm256_fmadd_ps(a1_packFloat8, b_packFloat8, C_buffer[3]);
 
-        C_buffer[2] = _mm256_fmadd_ps(a0_packFloat8, b_packFloat8[1], C_buffer[2]);
-        C_buffer[3] = _mm256_fmadd_ps(a1_packFloat8, b_packFloat8[1], C_buffer[3]);
+        b_packFloat8 = _mm256_broadcast_ss(blockB_packed + 2);
+        C_buffer[4] = _mm256_fmadd_ps(a0_packFloat8, b_packFloat8, C_buffer[4]);
+        C_buffer[5] = _mm256_fmadd_ps(a1_packFloat8, b_packFloat8, C_buffer[5]);
 
-        C_buffer[4] = _mm256_fmadd_ps(a0_packFloat8, b_packFloat8[2], C_buffer[4]);
-        C_buffer[5] = _mm256_fmadd_ps(a1_packFloat8, b_packFloat8[2], C_buffer[5]);
+        b_packFloat8 = _mm256_broadcast_ss(blockB_packed + 3);
+        C_buffer[6] = _mm256_fmadd_ps(a0_packFloat8, b_packFloat8, C_buffer[6]);
+        C_buffer[7] = _mm256_fmadd_ps(a1_packFloat8, b_packFloat8, C_buffer[7]);
 
-        C_buffer[6] = _mm256_fmadd_ps(a0_packFloat8, b_packFloat8[3], C_buffer[6]);
-        C_buffer[7] = _mm256_fmadd_ps(a1_packFloat8, b_packFloat8[3], C_buffer[7]);
+        b_packFloat8 = _mm256_broadcast_ss(blockB_packed + 4);
+        C_buffer[8] = _mm256_fmadd_ps(a0_packFloat8, b_packFloat8, C_buffer[8]);
+        C_buffer[9] = _mm256_fmadd_ps(a1_packFloat8, b_packFloat8, C_buffer[9]);
 
-        C_buffer[8] = _mm256_fmadd_ps(a0_packFloat8, b_packFloat8[4], C_buffer[8]);
-        C_buffer[9] = _mm256_fmadd_ps(a1_packFloat8, b_packFloat8[4], C_buffer[9]);
-
-        C_buffer[10] = _mm256_fmadd_ps(a0_packFloat8, b_packFloat8[5], C_buffer[10]);
-        C_buffer[11] = _mm256_fmadd_ps(a1_packFloat8, b_packFloat8[5], C_buffer[11]);
+        b_packFloat8 = _mm256_broadcast_ss(blockB_packed + 5);
+        C_buffer[10] = _mm256_fmadd_ps(a0_packFloat8, b_packFloat8, C_buffer[10]);
+        C_buffer[11] = _mm256_fmadd_ps(a1_packFloat8, b_packFloat8, C_buffer[11]);
 
         blockA_packed += 16;
         blockB_packed += 6;
@@ -207,32 +214,43 @@ void kernel_16x6(float* blockA_packed, float* blockB_packed, float* C, const int
 
     if (m != 16) {
         for (int j = 0; j < n; j++) {
-            _mm256_maskstore_ps(&C[j * M], masks[0], C_buffer[2 * j]);
-            _mm256_maskstore_ps(&C[j * M + 8], masks[1], C_buffer[2 * j + 1]);
+            _mm256_maskstore_ps(&C[j * M], packed_masks[0], C_buffer[j * 2]);
+            _mm256_maskstore_ps(&C[j * M + 8], packed_masks[1], C_buffer[j * 2 + 1]);
         }
     } else {
         for (int j = 0; j < n; j++) {
-            _mm256_storeu_ps(&C[j * M], C_buffer[2 * j]);
-            _mm256_storeu_ps(&C[j * M + 8], C_buffer[2 * j + 1]);
+            _mm256_storeu_ps(&C[j * M], C_buffer[j * 2]);
+            _mm256_storeu_ps(&C[j * M + 8], C_buffer[j * 2 + 1]);
         }
     }
+
 }
 
-void matmul_pack_mask(float* A, float* B, float* C, const int M, const int N, const int K) {
-    for (int i = 0; i < M; i += MR) {
-        const int m = min(MR, M - i);
-        pack_blockA(&A[i], blockA_packed, m, M, K);
-        int count  = 0;
-        for (int j = 0; j < N; j += NR) {
-            const int n = min(NR, N - j);
-            pack_blockB(&B[j * K], blockB_packed, n, N, K);
-            kernel_16x6(blockA_packed, blockB_packed, &C[j * M + i], m, n, M, N, K);
-            count+=1;
+void matmul_parallel(float* A, float* B, float* C, const int M, const int N, const int K) {
+    for (int j = 0; j < N; j += NC) {
+        const int nc = min(NC, N - j);
+        for (int p = 0; p < K; p += KC) {
+            const int kc = min(KC, K - p);
+            pack_blockB(&B[j * K + p], blockB_packed, nc, kc, K);
+            for (int i = 0; i < M; i += MC) {
+                const int mc = min(MC, M - i);
+                pack_blockA(&A[p * M + i], blockA_packed, mc, kc, M);
+#pragma omp parallel for num_threads(NTHREADS) schedule(static)
+                for (int jr = 0; jr < nc; jr += NR) {
+                    const int nr = min(NR, nc - jr);
+                    for (int ir = 0; ir < mc; ir += MR) {
+                        const int mr = min(MR, mc - ir);
+                        kernel_16x6(&blockA_packed[ir * kc], &blockB_packed[jr * kc],
+                                    &C[(j + jr) * M + (i + ir)], mr, nr, kc, M);
+                    }
+                }
+            }
         }
     }
 }
 
 void matmul_naive(float* A, float* B, float* C, const int M, const int N, const int K) {
+  #pragma omp parallel for collapse(2) num_threads(NTHREADS)
     for (int i = 0; i < M; i++) {
         for (int j = 0; j < N; j++) {
             for (int p = 0; p < K; p++) {
@@ -242,6 +260,16 @@ void matmul_naive(float* A, float* B, float* C, const int M, const int N, const 
     }
 }
 
+void print_mat(float* mat, const int M, const int N) {
+    for (int i = 0; i < M; i++) {
+        for (int j = 0; j < N; j++) {
+            printf("%f ", mat[i * N + j]);
+        }
+        printf("\n");
+    }
+    printf("\n");
+}
+
 void init_rand(float* mat, const int M, const int N) {
     int total = M * N;
     for (int i = 0; i < M * N; i++) {
@@ -249,7 +277,6 @@ void init_rand(float* mat, const int M, const int N) {
         mat[i] = (float)i / (total - 1);
     }
 }
-
 
 void init_const(float* mat, const float value, const int M, const int N) {
     for (int i = 0; i < M; i++) {
@@ -262,7 +289,7 @@ void init_const(float* mat, const float value, const int M, const int N) {
 void compare_mats(float* mat1, float* mat2, const int M, const int N) {
     for (int i = 0; i < M; i++) {
         for (int j = 0; j < N; j++) {
-            if (fabsf(mat1[j * M + i] - mat2[j * M + i]) > 1e-3) {
+            if (fabsf(mat1[j * M + i] - mat2[j * M + i]) > 1e-4) {
                 printf("MISMATCH! Element[%d][%d] %f != %f\n", i, j, mat1[j * M + i],
                        mat2[j * M + i]);
                 return;
@@ -294,23 +321,38 @@ int main() {
     matmul_naive(A, B, C_ref, M, N, K);
 #endif
     double FLOP = 2 * (double)M * N * K;
+    double gflops_sum = 0.0, gflops_min = DBL_MAX, gflops_max = DBL_MIN;
 
     for (int i = 0; i < NITER; i++) {
         init_const(C, 0.0, M, N);
         uint64_t start = timer();
-        matmul_pack_mask(A, B, C, M, N, K);
+        matmul_parallel(A, B, C, M, N, K);
         uint64_t end = timer();
 
-        double exec_time = (end - start) * 1e-9;
-        double FLOPS = FLOP / exec_time;
+        double exec_time = (end - start) * 1e-9; // Execution time in seconds
+        double FLOPS = FLOP / exec_time;        // Floating-point operations per second
+        double GFLOPS = FLOPS / 1e9;            // GFLOPS
 
-        printf("Exec. time = %.3fms\n", exec_time * 1000);
-        printf("GFLOPS = %.3f\n", FLOPS / 1e9);
+        // Accumulate GFLOPS for statistics
+        gflops_sum += GFLOPS;
+        if (GFLOPS < gflops_min) gflops_min = GFLOPS;
+        if (GFLOPS > gflops_max) gflops_max = GFLOPS;
+
+        printf("Exec. time = %.3f ms\n", exec_time * 1000);
+        printf("GFLOPS = %.3f\n", GFLOPS);
 #ifdef TEST
         compare_mats(C, C_ref, M, N);
 #endif
         printf("\n");
     }
+
+    // Compute average GFLOPS
+    double gflops_avg = gflops_sum / NITER;
+
+    // Print statistics
+    printf("Average GFLOPS = %.3f\n", gflops_avg);
+    printf("Max GFLOPS = %.3f\n", gflops_max);
+    printf("Min GFLOPS = %.3f\n", gflops_min);
 
     _mm_free(A);
     _mm_free(B);
